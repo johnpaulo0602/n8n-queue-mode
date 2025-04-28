@@ -1,0 +1,193 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: postgres-n8n-compose
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - db_storage:/var/lib/postgresql/data
+      - ./init-data.sh:/docker-entrypoint-initdb.d/init-data.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      internal:
+        aliases:
+          - postgres-n8n
+    labels:
+      - "traefik.enable=false"
+
+  redis:
+    image: redis:6-alpine
+    container_name: redis-n8n-compose
+    restart: always
+    volumes:
+      - redis_storage:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      internal:
+        aliases:
+          - redis-n8n
+    labels:
+      - "traefik.enable=false"
+
+  n8n-editor:
+    image: docker.n8n.io/n8nio/n8n
+    container_name: n8n-compose-editor
+    restart: always
+    ports:
+      - ${N8N_PORT}:${N8N_PORT}
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres-n8n
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=redis-n8n
+      - QUEUE_BULL_REDIS_PORT=6379
+      - QUEUE_HEALTH_CHECK_ACTIVE=true
+      - N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_TRUSTED_PROXIES=*
+      - N8N_TRUST_PROXY=true
+      - N8N_METRICS=true
+      - N8N_METRICS_INCLUDE_QUEUE_METRICS=true
+      - N8N_PORT=${N8N_PORT}
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PROTOCOL=${N8N_PROTOCOL}
+      - N8N_DISABLE_PRODUCTION_MAIN_PROCESS=${N8N_DISABLE_PRODUCTION_MAIN_PROCESS}
+      - N8N_PUSH_BACKEND=websocket
+      - N8N_RUNNERS_ENABLED=true
+      - OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      - WEBHOOK_URL=${N8N_PROTOCOL}://${N8N_HOST}/
+    volumes:
+      - n8n_storage:/home/node/.n8n
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - web
+      - internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.n8n.rule=Host(`${N8N_HOST}`)"
+      - "traefik.http.routers.n8n.tls=true"
+      - "traefik.http.routers.n8n.tls.certresolver=lets-encrypt"
+      - "traefik.http.services.n8n.loadbalancer.server.port=${N8N_PORT}"
+      - "traefik.docker.network=web"
+
+  n8n-webhook:
+    image: docker.n8n.io/n8nio/n8n
+    container_name: n8n-compose-webhook
+    restart: always
+    command: webhook
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres-n8n
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=redis-n8n
+      - QUEUE_BULL_REDIS_PORT=6379
+      - QUEUE_HEALTH_CHECK_ACTIVE=true
+      - N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_TRUSTED_PROXIES=*
+      - N8N_TRUST_PROXY=true
+      - N8N_PORT=${N8N_PORT}
+      - N8N_WEBHOOK_URL=${N8N_PROTOCOL}://${N8N_HOST}/
+      - N8N_METRICS=true
+      - N8N_METRICS_INCLUDE_QUEUE_METRICS=true
+      - N8N_PUSH_BACKEND=websocket
+      - N8N_RUNNERS_ENABLED=true
+      - OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+    volumes:
+      - n8n_storage:/home/node/.n8n
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - web
+      - internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.n8n-webhook.rule=Host(`${N8N_HOST}`) && PathPrefix(`/webhook`)"
+      - "traefik.http.middlewares.webhook-prefix.stripprefix.prefixes=/webhook"
+      - "traefik.http.routers.n8n-webhook-test.rule=Host(`${N8N_HOST}`) && PathPrefix(`/webhook-test`)"
+      - "traefik.http.middlewares.webhook-test-prefix.stripprefix.prefixes=/webhook-test"
+      - "traefik.http.routers.n8n-webhook.tls=true"
+      - "traefik.http.routers.n8n-webhook.tls.certresolver=lets-encrypt"
+      - "traefik.http.routers.n8n-webhook-test.tls=true"
+      - "traefik.http.routers.n8n-webhook-test.tls.certresolver=lets-encrypt"
+      - "traefik.http.services.n8n-webhook.loadbalancer.server.port=${N8N_PORT}"
+      - "traefik.docker.network=web"
+      
+  n8n-worker:
+    image: docker.n8n.io/n8nio/n8n
+    container_name: n8n-compose-worker
+    restart: always
+    command: worker
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres-n8n
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=redis-n8n
+      - QUEUE_BULL_REDIS_PORT=6379
+      - QUEUE_HEALTH_CHECK_ACTIVE=true
+      - QUEUE_WORKER_CONCURRENCY=${QUEUE_WORKER_CONCURRENCY}
+      - N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_TRUSTED_PROXIES=*
+      - N8N_TRUST_PROXY=true
+      - N8N_METRICS=true
+      - N8N_METRICS_INCLUDE_QUEUE_METRICS=true
+      - N8N_PUSH_BACKEND=websocket
+      - N8N_RUNNERS_ENABLED=true
+      - OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+    volumes:
+      - n8n_storage:/home/node/.n8n
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+    labels:
+      - "traefik.enable=false"
+
+networks:
+  web:
+    external: true
+  internal:
+    driver: bridge
+
+volumes:
+  db_storage:
+  n8n_storage:
+  redis_storage:
